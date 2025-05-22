@@ -4,6 +4,7 @@ import itertools
 import random
 import time
 from typing import Optional, Protocol
+import math
 
 
 class Colour(Enum):
@@ -111,8 +112,7 @@ class Player(Protocol):
 
 
 class Game:
-    # TODO: tutaj poznasz zasady tego wariantu gry w izolację, są bardzo proste
-    # zasady:
+    # zasady: (Jarvis, przetłumacz mi to na angielski)
     #  * jest dwóch graczy, czerwony i niebieski, czerwony porusza się pierwszy
     #  * każdy gracz ma dokładnie jeden pionek w swoim kolorze ('R' lub 'B')
     #  * plansza jest prostokątem, w swoim pierwszym ruchu każdy gracz może położyć pionek na jej dowolnym pustym polu
@@ -122,6 +122,7 @@ class Game:
     #     * zarówno pionek innego gracza jak i zablokowane pola uniemożliwiają dalszy ruch (nie da się ich przeskoczyć)
     #  * jeżeli gracz musi wykonać ruch pionkiem, a nie jest to możliwe (każdy z ośmiu kierunków zablokowany)...
     #  * ...to taki gracz przegrywa (a jego przeciwnik wygrywa ;])
+
     def __init__(self, red: Player, blue: Player, board: Board, current_player: Colour = Colour.RED):
         self.red: Player = red
         self.blue: Player = blue
@@ -176,21 +177,39 @@ class MCTSNode:
         self.value: float = 0.5
         self.children: dict[tuple[int, int], MCTSNode] = dict()
         self.board: Board = board
-        self.current_player: Colour = current_player
+        self.current_player: Colour = current_player  # kto na tej planszy robi ruch
         self.c_coefficient: float = c_coefficient
 
     def select(self, final=False) -> tuple[int, int]:
-        # TODO: tutaj należy wybrać (i zwrócić) najlepszą możliwą akcję (w oparciu o aktualną wiedzę)
-        # podpowiedzi:
-        #  * klucze w słowniku `self.children` to pula dostępnych akcji
-        #  * każdą z nich należy ocenić zgodnie z techniką UCB (tak jakby był to problem wielorękiego bandyty)
-        #  * ocena akcji zależy od:
-        #     * jej wartościowania (`self.value`)
-        #     * oraz tego jak często była wybierana (`self.times_chosen`) w porównaniu z rodzicem
-        #     * odpowiednie wartości przechowują węzły-dzieci przyporządkowane w słowniku kluczom-akcjom
-        #  * w przypadku kilku akcji o takiej samej ocenie - wybieramy losowo
-        #  * gdy stosujemy technikę UCB pierwszeństwo mają akcje, które nie były jeszcze nigdy testowane
-        return None
+        if final:
+            most_picked_action = []
+            counter = -1
+
+            for key, child in self.children.items():
+                if child.times_chosen > counter:
+                    counter = child.times_chosen
+                    most_picked_action = [key]
+                elif child.times_chosen == counter:
+                    most_picked_action.append(key)
+
+            return random.choice(most_picked_action)
+
+
+        rewards: dict[int, tuple[int, int]] = dict()
+        total_children_moves = 0
+
+        for key, child in self.children.items():
+            if child.times_chosen == 0:
+                return key
+
+            total_children_moves += child.times_chosen
+
+        for key, child in self.children.items():
+            reward = child.value + child.c_coefficient * math.sqrt(math.log(total_children_moves) / child.times_chosen)
+            rewards[reward] = key
+
+        return self.get_random_best(rewards)
+
 
     def expand(self) -> None:
         if not self.terminal and self.leaf:
@@ -209,25 +228,29 @@ class MCTSNode:
 
     def simulate(self) -> Colour:
         if not self.terminal:
-            # TODO: w tym węźle rozgrywka nie zakończyła się, więc do ustalenia zwycięzcy potrzebna jest symulacja
-            # podpowiedzi:
-            #  * w tym celu najłatwiej uruchomić osobną, niezależną grę startującą z danego stanu planszy
-            #  * by sumulacja przebiegała możliwe szybko wykonujemy ją z użyciem losowych agentów
-            #  * po jej zakończeniu poznajemy i zwracamy zwycięzcę
-            return None
+            game = Game(RandomPlayer() , RandomPlayer(), self.board, current_player=self.current_player)
+            game.run(verbose=False)
+
+            return game.winner
         else:
             return self.current_player.flip()
 
+
     def backpropagate(self, winner: Colour) -> None:
-        # TODO: należy zaktualizować drzewo - wiedząc, że przejście przez ten węzeł skończyło się wygraną danego gracza
-        # podpowiedzi:
-        #  * przede wszystkim należy zaktualizować licznik odwiedzeń (`self.times_chosen`)
-        #  * poza tym, konieczna jest też korekta wartościowania (`self.value`)
-        #     * siła korekty powinna zależeć od tego, które to z kolei odwiedziny danego węzła
-        #     * uwaga - fakt, iż np. gracz czerwony wygrał partię ma inny wpływ na wartościowanie jego węzłów...
-        #     * ...a inny na wartościowanie węzłów, w których ruch musiał wykonać jego przeciwnik
-        #  * warto pamiętać, by po aktualizacji danych węzeł powiadomił o takiej konieczności również swojego rodzica
-        pass
+        self.times_chosen += 1
+        reward = -1 if winner == self.current_player else 1
+        self.value += (reward - self.value) / self.times_chosen
+        # self.value += (self.value - reward) / self.times_chosen
+
+
+        if self.parent is not None:
+            self.parent.backpropagate(winner)
+
+
+    @staticmethod
+    def get_random_best(rewards: dict[int, tuple[int, int]]):
+        max_key = max(rewards.keys())
+        return random.choice([item for key, item in rewards.items() if key == max_key])
 
 
 class MCTSPlayer(Player):
@@ -249,8 +272,7 @@ class MCTSPlayer(Player):
             if elapsed_time >= self.time_limit:
                 break
 
-        action = self.root_node.select(final=True)  # TODO należy zmienić selekcje tak, by wybrała najlepszą akcję
-        # podpowiedź: zamiast UCB wystarczy zwrócić akcję najczęściej odwiedzaną
+        action = self.root_node.select(final=True)
         self._step_down(action)
         return action
 
@@ -277,25 +299,90 @@ class MCTSPlayer(Player):
 def main() -> None:
     red_wins = 0
     blue_wins = 0
+    time_limit = 0.5
+    c = 0.5
 
-    for _ in range(100):
-        board = Board(7, 5)  # TODO: na początek możesz skorzystać z mniejszej planszy (np. 4x4)
-        red_player = RandomPlayer() # TODO: zastąp jednego z agentów wariantem MCTS
-        # podpowiedź: np. takim `red_player = MCTSPlayer(0.2, 0.5)`
-        blue_player = RandomPlayer()
+    for i in range(100):
+        board = Board(8, 8)
+        # red_player = RandomPlayer()
+        # blue_player = RandomPlayer()
+
+        blue_player = MCTSPlayer(time_limit, c)
+        red_player = MCTSPlayer(0.2, 3)
         game = Game(red_player, blue_player, board)
-        game.run(verbose=True)  # TODO: jeżeli nie chcesz czytać na konsoli zapisu partii, skorzystaj z `verbose=False`
+        game.run(verbose=False)
 
         if game.winner == Colour.RED:
             red_wins += 1
         else:
             blue_wins += 1
 
-    print(red_wins, blue_wins)  # TODO: jeżeli wszystko poszło dobrze, to agent MCTS powtarzalnie wygrywa z losowym
+        print(f"After {i} games status: {red_wins=}, {blue_wins=}")
+
+    print(red_wins, blue_wins)
 
 
 if __name__ == '__main__':
-    main()  # TODO: jeżeli podstawowy eksperyment zakończył się sukcesem to sprawdź inne jego warianty
-    # podpowiedź:
-    #  * możesz zorganizować pojedynek agentów MCTS o różnych parametrach (np. czasie na wybór akcji)
-    #  * możesz też zmienić rozmiar planszy lub skłonność do eksplorowania (`self.c_coefficient`)
+    main()
+
+
+# My little schema for testing. I have put it here for you, my little friend of UMISI in the future.
+# You will have to edit a little (as always) ((you are smart, you will figure it out!))
+# It isn't perfect, but I hope it's enough <3
+
+# import matplotlib.pyplot as plt
+# from concurrent.futures import ProcessPoolExecutor
+
+# def simulate_games_wrapper(args: Tuple[float, float, float, int, str]) -> Tuple[float, float, float]:
+#     c_red, c_blue, time_limit, no_games, tested_player = args
+#
+#     red_wins = 0
+#     blue_wins = 0
+#
+#     for _ in range(no_games):
+#         board = Board(8, 8)
+#         red_player = MCTSPlayer(time_limit, c_red)
+#         blue_player = MCTSPlayer(time_limit, c_blue)
+#         game = Game(red_player, blue_player, board)
+#         game.run(verbose=False)
+#
+#         if game.winner == Colour.RED:
+#             red_wins += 1
+#         else:
+#             blue_wins += 1
+#
+#     win_percentage = (red_wins if tested_player == "Red_vs_Blue" else blue_wins) / no_games * 100
+#     return c_red, c_blue, win_percentage
+#
+#
+# def main() -> None:
+#     c_tab = np.round(np.arange(0.2, 2.1, 0.4), 2)
+#     no_games = 100
+#     tested_player = "Red_vs_Blue"
+#     time_limit = 0.5
+#
+#     # Create a list of argument tuples
+#     tasks = [(c_red, c_blue, time_limit, no_games, tested_player) for c_red in c_tab for c_blue in c_tab]
+#
+#     results = []
+#     with ProcessPoolExecutor() as executor:
+#         for result in executor.map(simulate_games_wrapper, tasks):
+#             results.append(result)
+#             print(f"{result[0]=}, {result[1]=}, {result[2]=:.2f}% wins")
+#
+#     # Plot results for each c_red
+#     for c_red in c_tab:
+#         red_win_percentages = [res[2] for res in results if res[0] == c_red]
+#         c_blues = [res[1] for res in results if res[0] == c_red]
+#
+#         plt.figure(figsize=(10, 5))
+#         plt.plot(c_blues, red_win_percentages, marker='o',
+#                  label=f'{tested_player} wins out of {no_games} games, c benchmark')
+#         plt.title(f'{tested_player} with c_red={c_red}, time={time_limit}')
+#         plt.xlabel("blue c_coefficient")
+#         plt.ylabel(f'red wins % for {no_games} games')
+#         plt.legend()
+#         plt.tight_layout()
+#
+#         plot_path = f"{tested_player}_c_red_{c_red}_games_{no_games}_8x8_time_{time_limit}.png"
+#         plt.savefig(plot_path)
